@@ -175,7 +175,11 @@
    (s/optional-key :reason_code) s/Int
    (s/optional-key :output_url) s/Str
    (s/optional-key :cancelled) s/Bool
-   (s/optional-key :reason_string) s/Str})
+   (s/optional-key :reason_string) s/Str
+   (s/optional-key :exit_code) s/Int
+   (s/optional-key :progress) s/Int
+   (s/optional-key :progress_message) s/Str
+   (s/optional-key :sandbox) s/Str})
 
 (defn max-128-characters-and-alphanum?
   "Returns true if s contains only '.', '_', '-' or
@@ -726,41 +730,46 @@
         application (:job/application job)
         expected-runtime (:job/expected-runtime job)
         state (case (:job/state job)
-                :job.state/completed
-                (if (some #{:instance.status/success}
-                          (map :instance/status (:job/instance job)))
-                  "success" "failed")
-                :job.state/running "running"
-                :job.state/waiting "waiting")
-        instances (map (fn [instance]
-                         (let [hostname (:instance/hostname instance)
-                               executor-states (get-executor-states fid hostname)
-                               url-path (try
-                                          (executor-state->url-path hostname (get executor-states (:instance/executor-id instance)))
-                                          (catch Exception e
-                                            nil))
-                               start (:instance/start-time instance)
-                               mesos-start (:instance/mesos-start-time instance)
-                               end (:instance/end-time instance)
-                               cancelled (:instance/cancelled instance)
-                               reason (reason/instance-entity->reason-entity db instance)]
-                           (cond-> {:backfilled false ;; Backfill has been deprecated
+                          :job.state/completed
+                          (if (some #{:instance.status/success}
+                                    (map :instance/status (:job/instance job)))
+                            "success" "failed")
+                 :job.state/running "running"
+                 :job.state/waiting "waiting")
+                 instances
+                 (map (fn [instance]
+                        (let [hostname (:instance/hostname instance)
+                              executor-states (get-executor-states fid hostname)
+                              url-path (try
+                                         (executor-state->url-path hostname (get executor-states (:instance/executor-id instance)))
+                                         (catch Exception e
+                                           nil))
+                              start (:instance/start-time instance)
+                              mesos-start (:instance/mesos-start-time instance)
+                              end (:instance/end-time instance)
+                              cancelled (:instance/cancelled instance)
+                              reason (reason/instance-entity->reason-entity db instance)
+                          exit-code (:instance/exit-code instance)
+                              progress (:instance/progress instance)
+                              progress-message (:instance/progress-message instance)
+                              sandbox (:instance/sandbox instance)](cond-> {:backfilled false ;; Backfill has been deprecated
                                     :executor_id (:instance/executor-id instance)
-                                    :hostname hostname
-                                    :ports (:instance/ports instance)
-                                    :preempted (:instance/preempted? instance false)
-                                    :slave_id (:instance/slave-id instance)
-                                    :status (name (:instance/status instance))
-                                    :task_id (:instance/task-id instance)}
-                                   url-path (assoc :output_url url-path)
-                                   start (assoc :start_time (.getTime start))
-                                   mesos-start (assoc :mesos_start_time (.getTime mesos-start))
-                                   end (assoc :end_time (.getTime end))
-                                   cancelled (assoc :cancelled cancelled)
-                                   reason (assoc :reason_code (:reason/code reason)
-                                                 :reason_string (:reason/string reason)))))
-                       (:job/instance job))
-        submit-time (when (:job/submit-time job) ; due to a bug, submit time may not exist for some jobs
+                                   :hostname hostname
+                                   :ports (:instance/ports instance)
+                                   :preempted (:instance/preempted? instance false)
+                                   :slave_id (:instance/slave-id instance)
+                                   :status (name (:instance/status instance))
+                                  :task_id (:instance/task-id instance)}url-path (assoc :output_url url-path)
+                                  start (assoc :start_time (.getTime start))
+                                  mesos-start (assoc :mesos_start_time (.getTime mesos-start))
+                                  end (assoc :end_time (.getTime end))
+                                  cancelled (assoc :cancelled cancelled)
+                                  reason (assoc :reason_code (:reason/code reason)
+                                                :reason_string (:reason/string reason))exit-code (assoc :exit_code exit-code)
+                                  progress (assoc :progress progress)
+                                  progress-message (assoc :progress_message progress-message)
+                                  sandbox (assoc :sandbox sandbox))))
+                      (:job/instance job))submit-time (when (:job/submit-time job) ; due to a bug, submit time may not exist for some jobs
                 (.getTime (:job/submit-time job)))
         job-map {:command (:job/command job)
                  :cpus (:cpus resources)

@@ -19,12 +19,9 @@
   (:require [clj-time.coerce :as tc]
             [clj-time.core :as t]
             [clojure.core.async :as async]
-            [clojure.edn :as edn]
+            [clojure.data.json :as json]
             [clojure.string :as str]
-            [cook.curator :as curator]
-            [cook.mesos :as mesos]
             [cook.mesos.scheduler :as sched]
-            [cook.mesos.schema :as schem]
             [cook.mesos.share :as share]
             [cook.mesos.util :as util]
             [cook.test.testutil :refer (restore-fresh-database! create-dummy-group create-dummy-job create-dummy-instance init-offer-cache)]
@@ -42,43 +39,43 @@
 
 (defn make-uuid
   []
-  (str  (UUID/randomUUID)))
+  (str (UUID/randomUUID)))
 
 (defn create-running-job
   [conn host & args]
   (let [job (apply create-dummy-job (cons conn args))
         inst (create-dummy-instance conn job :instance-status :instance.status/running :hostname host)]
-  [job inst]))
+    [job inst]))
 
 (defn make-dummy-scheduler
   []
-  (let [driver  (atom nil)]
+  (let [driver (atom nil)]
     (.. (com.netflix.fenzo.TaskScheduler$Builder.)
-      (disableShortfallEvaluation) ;; We're not using the autoscaling features
-      (withLeaseOfferExpirySecs 1) ;; should be at least 1 second
-      (withRejectAllExpiredOffers)
-      (withFitnessCalculator BinPackingFitnessCalculators/cpuMemBinPacker)
-      (withFitnessGoodEnoughFunction (reify com.netflix.fenzo.functions.Func1
-                                       (call [_ fitness]
-                                         (> fitness 0.8))))
-      (withLeaseRejectAction (reify com.netflix.fenzo.functions.Action1
-                               (call [_ lease] (do))))
-      (build))))
+        (disableShortfallEvaluation) ;; We're not using the autoscaling features
+        (withLeaseOfferExpirySecs 1) ;; should be at least 1 second
+        (withRejectAllExpiredOffers)
+        (withFitnessCalculator BinPackingFitnessCalculators/cpuMemBinPacker)
+        (withFitnessGoodEnoughFunction (reify com.netflix.fenzo.functions.Func1
+                                         (call [_ fitness]
+                                           (> fitness 0.8))))
+        (withLeaseRejectAction (reify com.netflix.fenzo.functions.Action1
+                                 (call [_ lease] (do))))
+        (build))))
 
 (defn make-resource
   [name type val]
-  (mesomatic.types/map->Resource (merge
-                                   {:name name
-                                    :type type
-                                    :scalar nil
-                                    :ranges []
-                                    :set #{}
-                                    :role "*"}
-                                   (case type
-                                     :value-scalar {:scalar val}
-                                     :value-ranges {:ranges [(mesomatic.types/map->ValueRange val)]}
-                                     :value-set {:set #{val}}
-                                     {}))))
+  (mtypes/map->Resource (merge
+                          {:name name
+                           :type type
+                           :scalar nil
+                           :ranges []
+                           :set #{}
+                           :role "*"}
+                          (case type
+                            :value-scalar {:scalar val}
+                            :value-ranges {:ranges [(mtypes/map->ValueRange val)]}
+                            :value-set {:set #{val}}
+                            {}))))
 
 (defn make-offer-resources
   [cpus mem disk ports gpus]
@@ -90,19 +87,19 @@
 
 (defn make-attribute
   [name type val]
-  (mesomatic.types/map->Attribute (merge
-                                    {:name name
-                                     :type type
-                                     :scalar nil
-                                     :ranges []
-                                     :set #{}
-                                     :role "*"}
-                                    (case type
-                                      :value-scalar {:scalar val}
-                                      :value-text {:text val}
-                                      :value-ranges {:ranges [(mesomatic.types/map->ValueRange val)]}
-                                      :value-set {:set #{val}}
-                                      nil))))
+  (mtypes/map->Attribute (merge
+                           {:name name
+                            :type type
+                            :scalar nil
+                            :ranges []
+                            :set #{}
+                            :role "*"}
+                           (case type
+                             :value-scalar {:scalar val}
+                             :value-text {:text val}
+                             :value-ranges {:ranges [(mtypes/map->ValueRange val)]}
+                             :value-set {:set #{val}}
+                             nil))))
 
 (defn make-offer-attributes
   [attrs]
@@ -111,13 +108,13 @@
 (defn make-mesos-offer
   [id fid slave-id hostname & {:keys [cpus mem disk ports gpus attrs]
                                :or {cpus 40.0 mem 5000.0 disk 6000.0 ports {:begin 31000 :end 32000} gpus 0.0 attrs {}}}]
-  (mesomatic.types/map->Offer {:id (mesomatic.types/map->OfferID {:value id})
-                               :framework-id fid
-                               :slave-id (mesomatic.types/map->SlaveID {:value slave-id})
-                               :hostname hostname
-                               :resources (make-offer-resources cpus mem disk ports gpus)
-                               :attributes (make-offer-attributes (merge attrs {"HOSTNAME" hostname}))
-                               :executor-ids []}))
+  (mtypes/map->Offer {:id (mtypes/map->OfferID {:value id})
+                      :framework-id fid
+                      :slave-id (mtypes/map->SlaveID {:value slave-id})
+                      :hostname hostname
+                      :resources (make-offer-resources cpus mem disk ports gpus)
+                      :attributes (make-offer-attributes (merge attrs {"HOSTNAME" hostname}))
+                      :executor-ids []}))
 
 (defn make-vm-offer
   [fid host offid & {:keys [attrs cpus mem disk] :or {attrs {} cpus 100.0 mem 100000.0 disk 100000.0}}]
@@ -129,31 +126,31 @@
 
 (defn schedule-and-run-jobs
   [conn fid scheduler offers job-ids]
-    (let [jobs (map #(d/entity (d/db conn) %) job-ids)
-          task-ids (take (count jobs) (repeatedly #(str (java.util.UUID/randomUUID))))
-          guuid->considerable-cotask-ids (util/make-guuid->considerable-cotask-ids (zipmap jobs task-ids))
-          tasks (map #(sched/make-task-request %1 :task-id %2 :guuid->considerable-cotask-ids guuid->considerable-cotask-ids)
-                     jobs task-ids)
-          result (-> scheduler
+  (let [jobs (map #(d/entity (d/db conn) %) job-ids)
+        task-ids (take (count jobs) (repeatedly #(str (java.util.UUID/randomUUID))))
+        guuid->considerable-cotask-ids (util/make-guuid->considerable-cotask-ids (zipmap jobs task-ids))
+        tasks (map #(sched/make-task-request %1 :task-id %2 :guuid->considerable-cotask-ids guuid->considerable-cotask-ids)
+                   jobs task-ids)
+        result (-> scheduler
                    (.scheduleOnce tasks offers))
-          tasks-assigned  (some->> result
-                                   .getResultMap
-                                   vals
-                                   (mapcat #(.getTasksAssigned %)))
-          tid-to-task (zipmap task-ids tasks)
-          tid-to-job (zipmap task-ids jobs)
-          tid-to-hostname (into {} (map (juxt #(.getTaskId %) #(.getHostname %)) tasks-assigned))
-          scheduled (set (keys tid-to-hostname))]
-      (if (> (count scheduled) 0)
-        (do
-          ; Create an instance as if job was running
-          (doall (map #(create-dummy-instance conn (:db/id (get tid-to-job (key %))) :instance-status :instance.status/running
-                        :task-id (key %) :hostname (val %)) tid-to-hostname))
-          ; Tell fenzo the job was scheduled
-          (doall (map #(.call (.getTaskAssigner scheduler) (get tid-to-task (key %)) (val %)) tid-to-hostname))
-          ; Return
-          {:scheduled scheduled :result result})
-        {:result result})))
+        tasks-assigned (some->> result
+                                .getResultMap
+                                vals
+                                (mapcat #(.getTasksAssigned %)))
+        tid-to-task (zipmap task-ids tasks)
+        tid-to-job (zipmap task-ids jobs)
+        tid-to-hostname (into {} (map (juxt #(.getTaskId %) #(.getHostname %)) tasks-assigned))
+        scheduled (set (keys tid-to-hostname))]
+    (if (> (count scheduled) 0)
+      (do
+        ; Create an instance as if job was running
+        (doall (map #(create-dummy-instance conn (:db/id (get tid-to-job (key %))) :instance-status :instance.status/running
+                                            :task-id (key %) :hostname (val %)) tid-to-hostname))
+        ; Tell fenzo the job was scheduled
+        (doall (map #(.call (.getTaskAssigner scheduler) (get tid-to-task (key %)) (val %)) tid-to-hostname))
+        ; Return
+        {:scheduled scheduled :result result})
+      {:result result})))
 
 (deftest test-sort-jobs-by-dru-category
   (let [uri "datomic:mem://test-sort-jobs-by-dru"
@@ -338,7 +335,7 @@
       ;; We're looking for one task to get assigned
       (are [offers] (= 1 (count (mapcat :tasks
                                         (:matches (sched/match-offer-to-schedule
-                                                   (fenzo-maker) schedule offers)))))
+                                                    (fenzo-maker) schedule offers)))))
                     (offer-maker 1 1000)
                     (offer-maker 1.5 1500)))
     (testing "Consume full schedule cases"
@@ -346,7 +343,7 @@
       (are [offers] (= (count schedule)
                        (count (mapcat :tasks
                                       (:matches (sched/match-offer-to-schedule
-                                                 (fenzo-maker) schedule offers)))))
+                                                  (fenzo-maker) schedule offers)))))
                     (offer-maker 4 4000)
                     (offer-maker 5 5000)))))
 
@@ -358,23 +355,23 @@
         offer-maker (fn [cpus hostname]
                       (make-mesos-offer (make-uuid) (make-uuid) (make-uuid) hostname :cpus cpus :mem 200000.0))
         constraint-group (create-dummy-group conn :host-placement
-                           {:host-placement/type :host-placement.type/balanced
-                            :host-placement/parameters {:host-placement.balanced/attribute "HOSTNAME"
-                                                        :host-placement.balanced/minimum 10}})
+                                             {:host-placement/type :host-placement.type/balanced
+                                              :host-placement/parameters {:host-placement.balanced/attribute "HOSTNAME"
+                                                                          :host-placement.balanced/minimum 10}})
         conflicting-job-id (create-dummy-job conn :ncpus 1.0 :memory 1.0 :name "conflict"
                                              :group constraint-group)
         low-priority-ids (doall (repeatedly 8
-                                       #(create-dummy-job conn :ncpus 1.0
+                                            #(create-dummy-job conn :ncpus 1.0
                                                                :memory 1000.0
                                                                :name "low-priority"
                                                                :priority 1
                                                                :job-state :job.state/waiting)))
         high-priority-ids (doall (repeatedly 1
                                              #(create-dummy-job conn :ncpus 1.0
-                                                                     :memory 1000.0
-                                                                     :name "high-priority"
-                                                                     :priority 100
-                                                                     :job-state :job.state/waiting)))
+                                                                :memory 1000.0
+                                                                :name "high-priority"
+                                                                :priority 100
+                                                                :job-state :job.state/waiting)))
         fid (str "framework-id-" (java.util.UUID/randomUUID))
         fenzo (make-dummy-scheduler)
         ; Schedule conflicting
@@ -634,17 +631,17 @@
     (is (= (-> adapter .portRanges first .getEnd) 32000))))
 
 (deftest test-interpret-mesos-status
-  (let [mesos-status (mesomatic.types/map->TaskStatus {:task-id #mesomatic.types.TaskID{:value "a07708d8-7ab6-404d-b136-a3e2cb2567e3"},
-                                                       :state :task-lost,
-                                                       :message "Task launched with invalid offers: Offer mesomatic.types.OfferID@1d7408e3 is no longer valid",
-                                                       :source :source-master,
-                                                       :reason :reason-invalid-offers,
-                                                       :slave-id #mesomatic.types.SlaveID{:value "9c4f0a3f-d5e9-4430-809e-ec2e736f4cc3-S1"},
-                                                       :executor-id #mesomatic.types.ExecutorID{:value ""},
-                                                       :timestamp 1.470654131281046E9,
-                                                       :healthy false
-                                                       :data (com.google.protobuf.ByteString/copyFrom (.getBytes (pr-str {:percent 85.0}) "UTF-8"))
-                                                       :uuid (com.google.protobuf.ByteString/copyFrom (.getBytes "my-uuid" "UTF-8"))})
+  (let [mesos-status (mtypes/map->TaskStatus {:task-id #mesomatic.types.TaskID{:value "a07708d8-7ab6-404d-b136-a3e2cb2567e3"},
+                                              :state :task-lost,
+                                              :message "Task launched with invalid offers: Offer mesomatic.types.OfferID@1d7408e3 is no longer valid",
+                                              :source :source-master,
+                                              :reason :reason-invalid-offers,
+                                              :slave-id #mesomatic.types.SlaveID{:value "9c4f0a3f-d5e9-4430-809e-ec2e736f4cc3-S1"},
+                                              :executor-id #mesomatic.types.ExecutorID{:value ""},
+                                              :timestamp 1.470654131281046E9,
+                                              :healthy false
+                                              :data (com.google.protobuf.ByteString/copyFrom (.getBytes (pr-str {:percent 85.0}) "UTF-8"))
+                                              :uuid (com.google.protobuf.ByteString/copyFrom (.getBytes "my-uuid" "UTF-8"))})
         interpreted-status (sched/interpret-task-status mesos-status)]
     (is (= (:progress interpreted-status) 85.0))
     (is (= (:task-id interpreted-status) "a07708d8-7ab6-404d-b136-a3e2cb2567e3"))
@@ -652,9 +649,9 @@
     (is (= (:reason interpreted-status) :reason-invalid-offers))))
 
 (deftest test-unique-host-placement-constraint
-  (let  [uri "datomic:mem://test-unique-host-placement-constraint"
-         conn (restore-fresh-database! uri)
-         fid #mesomatic.types.FrameworkID{:value "my-original-framework-id"}]
+  (let [uri "datomic:mem://test-unique-host-placement-constraint"
+        conn (restore-fresh-database! uri)
+        fid #mesomatic.types.FrameworkID{:value "my-original-framework-id"}]
     (testing "conflicting jobs, different scheduling cycles"
       (let [scheduler (make-dummy-scheduler)
             shared-host "test-host"
@@ -666,7 +663,7 @@
             group (d/entity (d/db conn) group-id)
             ; Schedule first job
             scheduled-tasks (schedule-and-run-jobs conn fid scheduler (make-offers) [conflicting-job-id])
-            _ (is  (= 1 (count (:scheduled scheduled-tasks))))
+            _ (is (= 1 (count (:scheduled scheduled-tasks))))
             conflicting-task-id (first (:scheduled scheduled-tasks))
             ; Try to schedule conflicted job, but fail
             failures (-> (schedule-and-run-jobs conn fid scheduler (make-offers) [conflicted-job-id])
@@ -679,10 +676,10 @@
                             first
                             .getConstraintFailure
                             .getReason)]
-        (is  (= 1 (count failures)))
-        (is  (= 1 (count task-results)))
-        (is  (= fail-reason (format "The hostname %s is being used by other instances in group %s"
-                                 shared-host (:group/uuid group))))))
+        (is (= 1 (count failures)))
+        (is (= 1 (count task-results)))
+        (is (= fail-reason (format "The hostname %s is being used by other instances in group %s"
+                                   shared-host (:group/uuid group))))))
     (testing "conflicting jobs, same scheduling cycle"
       (let [scheduler (make-dummy-scheduler)
             shared-host "test-host"
@@ -695,7 +692,7 @@
             ; Schedule first job
             result (schedule-and-run-jobs conn fid scheduler (make-offers) [conflicting-job-id
                                                                             conflicted-job-id])
-            _ (is  (= 1 (count (:scheduled result))))
+            _ (is (= 1 (count (:scheduled result))))
             conflicting-task-id (-> result :scheduled first)
             ; Try to schedule conflicted job, but fail
             failures (-> result :result .getFailures)
@@ -706,33 +703,33 @@
                             first
                             .getConstraintFailure
                             .getReason)]
-        (is  (= 1 (count failures)))
-        (is  (= 1 (count task-results)))
-        (is  (= fail-reason (format "The hostname %s is being used by other instances in group %s"
-                                 shared-host (:group/uuid group))))))
+        (is (= 1 (count failures)))
+        (is (= 1 (count task-results)))
+        (is (= fail-reason (format "The hostname %s is being used by other instances in group %s"
+                                   shared-host (:group/uuid group))))))
     (testing "non conflicting jobs"
       (let [scheduler (make-dummy-scheduler)
             shared-host "test-host"
             make-offers #(vector (make-vm-offer fid shared-host (make-uuid)))
             isolated-job-id1 (create-dummy-job conn)
             isolated-job-id2 (create-dummy-job conn)]
-        (is  (= 1 (count (:scheduled (schedule-and-run-jobs conn fid scheduler (make-offers) [isolated-job-id1])))))
-        (is  (= 1 (count (:scheduled (schedule-and-run-jobs conn fid scheduler (make-offers) [isolated-job-id2])))))))))
+        (is (= 1 (count (:scheduled (schedule-and-run-jobs conn fid scheduler (make-offers) [isolated-job-id1])))))
+        (is (= 1 (count (:scheduled (schedule-and-run-jobs conn fid scheduler (make-offers) [isolated-job-id2])))))))))
 
 
 (deftest test-balanced-host-placement-constraint
-  (let  [uri "datomic:mem://test-balanced-host-placement-constraint"
-         conn (restore-fresh-database! uri)
-         fid #mesomatic.types.FrameworkID{:value "my-original-framework-id"}]
+  (let [uri "datomic:mem://test-balanced-host-placement-constraint"
+        conn (restore-fresh-database! uri)
+        fid #mesomatic.types.FrameworkID{:value "my-original-framework-id"}]
     (testing "schedule 9 jobs with hp-type balanced on 3 hosts, each host should get 3 jobs"
       (let [scheduler (make-dummy-scheduler)
             hostnames ["straw" "sticks" "bricks"]
             make-offers (fn [] (mapv #(make-vm-offer fid % (make-uuid)) hostnames))
             ; Group jobs, setting balanced host-placement constraint
             group-id (create-dummy-group conn
-                       :host-placement {:host-placement/type :host-placement.type/balanced
-                                        :host-placement/parameters {:host-placement.balanced/attribute "HOSTNAME"
-                                                                    :host-placement.balanced/minimum 3}})
+                                         :host-placement {:host-placement/type :host-placement.type/balanced
+                                                          :host-placement/parameters {:host-placement.balanced/attribute "HOSTNAME"
+                                                                                      :host-placement.balanced/minimum 3}})
             job-ids (doall (repeatedly 9 #(create-dummy-job conn :group group-id)))]
         (is (= {"straw" 3 "sticks" 3 "bricks" 3}
                (->> job-ids
@@ -754,24 +751,24 @@
                                   distinct))))))))
 
 (deftest test-attr-equals-host-placement-constraint
-  (let  [uri "datomic:mem://test-attr-equals-host-placement-constraint"
-         conn (restore-fresh-database! uri)
-         fid #mesomatic.types.FrameworkID{:value "my-original-framework-id"}
-         make-hostname #(str (java.util.UUID/randomUUID))
-         attr-name "az"
-         attr-val "east"
-         make-attr-offer (fn [cpus]
-                           (make-vm-offer fid (make-hostname) (make-uuid)
-                                          :cpus cpus :attrs {attr-name attr-val}))
-         ; Each non-attr offer can take only one job
-         make-non-attr-offers (fn [n]
-                                (into [] (repeatedly n #(make-vm-offer fid (make-hostname) (make-uuid)
-                                                                       :cpus 1.0 :attrs {attr-name "west"}))))]
+  (let [uri "datomic:mem://test-attr-equals-host-placement-constraint"
+        conn (restore-fresh-database! uri)
+        fid #mesomatic.types.FrameworkID{:value "my-original-framework-id"}
+        make-hostname #(str (java.util.UUID/randomUUID))
+        attr-name "az"
+        attr-val "east"
+        make-attr-offer (fn [cpus]
+                          (make-vm-offer fid (make-hostname) (make-uuid)
+                                         :cpus cpus :attrs {attr-name attr-val}))
+        ; Each non-attr offer can take only one job
+        make-non-attr-offers (fn [n]
+                               (into [] (repeatedly n #(make-vm-offer fid (make-hostname) (make-uuid)
+                                                                      :cpus 1.0 :attrs {attr-name "west"}))))]
     (testing "Create group, schedule one job unto VM, then all subsequent jobs must have same attr as the VM."
       (let [scheduler (make-dummy-scheduler)
             group-id (create-dummy-group conn :host-placement
-                       {:host-placement/type :host-placement.type/attribute-equals
-                        :host-placement/parameters {:host-placement.attribute-equals/attribute attr-name}})
+                                         {:host-placement/type :host-placement.type/attribute-equals
+                                          :host-placement/parameters {:host-placement.attribute-equals/attribute attr-name}})
             first-job (create-dummy-job conn :group group-id)
             other-jobs (doall (repeatedly 20 #(create-dummy-job conn :ncpus 1.0 :group group-id)))
             ; Group jobs, setting balanced host-placement constraint
@@ -798,9 +795,9 @@
                         vals
                         (reduce #(+ %1 (count (.getTasksAssigned %2))) 0)))))
         (testing "Other 15 jobs are unscheduled."
-          (is  (= 15 (->> batch-result
-                          .getFailures
-                          count))))))
+          (is (= 15 (->> batch-result
+                         .getFailures
+                         count))))))
     (testing "Jobs use any vm freely when forced and no attr-equals constraint is given"
       (let [scheduler (make-dummy-scheduler)
             first-job (create-dummy-job conn)
@@ -809,12 +806,12 @@
                             :scheduled
                             count)))]
         ; Need to use all offers to fit all 20 other-jobs
-        (is  (= 20 (->> (schedule-and-run-jobs conn fid scheduler
-                          (conj (make-non-attr-offers 15) (make-attr-offer 5.0)) other-jobs)
-                        :result
-                        .getResultMap
-                        vals
-                        (reduce #(+ %1 (count (.getTasksAssigned %2))) 0))))))))
+        (is (= 20 (->> (schedule-and-run-jobs conn fid scheduler
+                                              (conj (make-non-attr-offers 15) (make-attr-offer 5.0)) other-jobs)
+                       :result
+                       .getResultMap
+                       vals
+                       (reduce #(+ %1 (count (.getTasksAssigned %2))) 0))))))))
 
 (deftest test-gpu-share-prioritization
   (let [uri "datomic:mem://test-gpu-shares"
@@ -841,7 +838,7 @@
       (let [_ (share/set-share! conn "ljin"
                                 "Doesn't need lots of gpus"
                                 :gpus 1.0)
-              db (d/db conn)]
+            db (d/db conn)]
         (is (= [wzhao-1 wzhao-2 ljin-2 ljin-3 ljin-4] (map :db/id (:gpu (sched/sort-jobs-by-dru-category db)))))))))
 
 (deftest test-cancelled-task-killer
@@ -984,6 +981,86 @@
           (async/<!! (sched/handle-status-update conn driver fenzo
                                                  (make-dummy-status-update task-id :unknown :task-running)))
           (is (= first-observed-start-time (.getTime (mesos-start-time)))))))))
+
+(deftest test-handle-framework-message
+  (let [uri "datomic:mem://test-handle-framework-message"
+        conn (restore-fresh-database! uri)
+        make-message (fn [message] (-> message json/write-str str (.getBytes "UTF-8")))
+        query-instance-field (fn [instance-id field]
+                               (ffirst (q '[:find ?sandbox
+                                            :in $ ?i ?field
+                                            :where
+                                            [?i ?field ?sandbox]
+                                            [?i :instance/task-id ?task-id]]
+                                          (db conn) instance-id field)))]
+    (testing "missing task-id in message"
+      (let [task-id (str (UUID/randomUUID))]
+        (let [message (make-message {:dummy-data task-id})]
+          (is (nil? (sched/handle-framework-message conn message))))))
+
+    (testing "no transactions"
+      (let [task-id (str (UUID/randomUUID))]
+        (let [message (make-message {:task-id task-id})]
+          (is (nil? (sched/handle-framework-message conn message))))))
+
+    (testing "sandbox-location update"
+      (let [job-id (create-dummy-job conn :user "test-user" :job-state :job.state/running)
+            task-id (str (UUID/randomUUID))
+            instance-id (create-dummy-instance conn job-id :instance-status :instance.status/running :task-id task-id)]
+        (let [sandbox-location "/sandbox/location/for/task"
+              message (make-message {:task-id task-id :sandbox-location sandbox-location})]
+          (async/<!! (sched/handle-framework-message conn message))
+          (is (= sandbox-location (query-instance-field instance-id :instance/sandbox))))))
+
+    (testing "progress-message update"
+      (let [job-id (create-dummy-job conn :user "test-user" :job-state :job.state/running)
+            task-id (str (UUID/randomUUID))
+            instance-id (create-dummy-instance conn job-id :instance-status :instance.status/running :task-id task-id)]
+        (let [progress-message "Almost complete..."
+              message (make-message {:task-id task-id :progress-message progress-message})]
+          (async/<!! (sched/handle-framework-message conn message))
+          (is (= progress-message (query-instance-field instance-id :instance/progress-message))))))
+
+    (testing "progress update"
+      (let [job-id (create-dummy-job conn :user "test-user" :job-state :job.state/running)
+            task-id (str (UUID/randomUUID))
+            instance-id (create-dummy-instance conn job-id :instance-status :instance.status/running :task-id task-id)]
+        (let [progress 20
+              message (make-message {:task-id task-id :progress-percent progress})]
+          (async/<!! (sched/handle-framework-message conn message))
+          (is (= progress (query-instance-field instance-id :instance/progress))))
+        (let [progress 50
+              message (make-message {:task-id task-id :progress-percent progress})]
+          (async/<!! (sched/handle-framework-message conn message))
+          (is (= progress (query-instance-field instance-id :instance/progress))))))
+
+    (testing "exit-code update"
+      (let [job-id (create-dummy-job conn :user "test-user" :job-state :job.state/running)
+            task-id (str (UUID/randomUUID))
+            instance-id (create-dummy-instance conn job-id :instance-status :instance.status/running :task-id task-id)]
+        (let [exit-code 0
+              message (make-message {:task-id task-id :exit-code exit-code})]
+          (async/<!! (sched/handle-framework-message conn message))
+          (is (= exit-code (query-instance-field instance-id :instance/exit-code))))))
+
+    (testing "all fields update"
+      (let [job-id (create-dummy-job conn :user "test-user" :job-state :job.state/running)
+            task-id (str (UUID/randomUUID))
+            instance-id (create-dummy-instance conn job-id :instance-status :instance.status/running :task-id task-id)]
+        (let [exit-code 0
+              progress 90
+              progress-message "Almost complete..."
+              sandbox-location "/sandbox/location/for/task"
+              message (make-message {:task-id task-id
+                                     :exit-code exit-code
+                                     :progress-message progress-message
+                                     :progress-percent progress
+                                     :sandbox-location sandbox-location})]
+          (async/<!! (sched/handle-framework-message conn message))
+          (is (= exit-code (query-instance-field instance-id :instance/exit-code)))
+          (is (= progress (query-instance-field instance-id :instance/progress)))
+          (is (= progress-message (query-instance-field instance-id :instance/progress-message)))
+          (is (= sandbox-location (query-instance-field instance-id :instance/sandbox))))))))
 
 (deftest test-handle-stragglers
   (let [uri "datomic:mem://test-handle-stragglers"
@@ -1269,6 +1346,16 @@
 (deftest test-handle-resource-offers
   (let [test-user (System/getProperty "user.name")
         uri "datomic:mem://test-handle-resource-offers"
+        executor {:command "cook-executor"
+                  :log-level "INFO"
+                  :max-message-length 512
+                  :progress-output-name "stdout"
+                  :progress-regex-string "regex-string"
+                  :progress-sample-interval-ms 1000
+                  :uri {:cache true
+                        :executable true
+                        :extract false
+                        :value "file:///path/to/cook-executor"}}
         launched-offer-ids-atom (atom [])
         launched-job-ids-atom (atom [])
         driver (reify msched/SchedulerDriver
@@ -1314,8 +1401,8 @@
                                                                                :gpu [job-5 job-6]})
                                             user->usage (or user->usage {test-user {:count 1, :cpus 2, :mem 1024, :gpus 0}})
                                             user->quota (or user-quota {test-user {:count 10, :cpus 50, :mem 32768, :gpus 10}})
-                                            result (sched/handle-resource-offers! conn driver fenzo fid category->pending-jobs-atom (init-offer-cache) user->usage user->quota
-                                                                                  num-considerable offers-chan offers)]
+                                            result (sched/handle-resource-offers! conn driver fenzo fid executor category->pending-jobs-atom (init-offer-cache)
+                                                                                  user->usage user->quota num-considerable offers-chan offers)]
                                         (async/>!! offers-chan :end-marker)
                                         result))]
 
@@ -1456,18 +1543,18 @@
   (testing "clojure symbol"
     (is (instance? VMTaskFitnessCalculator
                    (sched/config-string->fitness-calculator
-                    "cook.test.mesos.scheduler/dummy-fitness-calculator"))))
+                     "cook.test.mesos.scheduler/dummy-fitness-calculator"))))
   (testing "java class on classpath"
     (is (instance? VMTaskFitnessCalculator
                    (sched/config-string->fitness-calculator
-                    cook.components/default-fitness-calculator))))
+                     cook.components/default-fitness-calculator))))
 
   (testing "bad input"
     (is (thrown? IllegalArgumentException (sched/config-string->fitness-calculator "not-a-valid-anything"))))
 
   (testing "something other than a VMTaskFitnessCalculator"
     (is (thrown? IllegalArgumentException (sched/config-string->fitness-calculator
-                                           "System/out")))))
+                                            "System/out")))))
 
 (deftest test-in-order-status-update-processing
   (let [status-store (atom [])

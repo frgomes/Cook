@@ -180,6 +180,8 @@
    mea-culpa-failure-limit  -- long, max failures of mea culpa reason before it is considered a 'real' failure
                                      see scheduler/docs/configuration.asc for more details
    task-constraints         -- map, constraints on task. See scheduler/docs/configuration.asc for more details
+   executor                 -- cook executor config includes command, log-level, message-length, progress-output-name,
+                                     progress-regex-string, progress-sample-interval-ms and uri.
    riemann-host             -- str, dns name of riemann
    riemann-port             -- int, port for riemann
    mesos-pending-jobs-atom  -- atom, Populate (and update) list of pending jobs into atom
@@ -187,7 +189,8 @@
    gpu-enabled?             -- boolean, whether cook will schedule gpus
    rebalancer-config        -- map, config for rebalancer. See scheduler/docs/rebalancer-config.asc for details
    fenzo-config             -- map, config for fenzo, See scheduler/docs/configuration.asc for more details"
-  [make-mesos-driver-fn get-mesos-utilization curator-framework mesos-datomic-conn mesos-datomic-mult zk-prefix offer-incubate-time-ms mea-culpa-failure-limit task-constraints riemann-host riemann-port mesos-pending-jobs-atom offer-cache gpu-enabled? rebalancer-config
+  [make-mesos-driver-fn get-mesos-utilization curator-framework mesos-datomic-conn mesos-datomic-mult zk-prefix offer-incubate-time-ms
+   mea-culpa-failure-limit task-constraints executor riemann-host riemann-port mesos-pending-jobs-atom offer-cache gpu-enabled? rebalancer-config
    {:keys [fenzo-fitness-calculator fenzo-floor-iterations-before-reset fenzo-floor-iterations-before-warn
            fenzo-max-jobs-considered fenzo-scaleback good-enough-fitness]
     :as fenzo-config}
@@ -211,29 +214,30 @@
                               (let [normal-exit (atom true)]
                                 (try
                                   (let [{:keys [scheduler view-incubating-offers]}
-                                        (sched/create-datomic-scheduler
-                                          mesos-datomic-conn
-                                          (fn set-or-create-framework-id [framework-id]
-                                            (curator/set-or-create
-                                              curator-framework
-                                              zk-framework-id
-                                              (.getBytes (-> framework-id mesomatic.types/pb->data :value) "UTF-8")))
-                                          current-driver
-                                          mesos-pending-jobs-atom
-                                          offer-cache
-                                          mesos-heartbeat-chan
-                                          offer-incubate-time-ms
-                                          mea-culpa-failure-limit
-                                          fenzo-max-jobs-considered
-                                          fenzo-scaleback
-                                          fenzo-floor-iterations-before-warn
-                                          fenzo-floor-iterations-before-reset
-                                          fenzo-fitness-calculator
-                                          task-constraints
-                                          gpu-enabled?
-                                          good-enough-fitness
-                                          trigger-chans)
-                                        driver (make-mesos-driver-fn scheduler framework-id)]
+        (sched/create-datomic-scheduler
+                   mesos-datomic-conn
+                   (fn set-or-create-framework-id [framework-id]
+                     (curator/set-or-create
+                      curator-framework
+                      zk-framework-id
+                      (.getBytes (-> framework-id mesomatic.types/pb->data :value) "UTF-8")))
+                   current-driver
+                   mesos-pending-jobs-atom
+                   offer-cache
+                   mesos-heartbeat-chan
+                   offer-incubate-time-ms
+                   mea-culpa-failure-limit
+                   fenzo-max-jobs-considered
+                   fenzo-scaleback
+                   fenzo-floor-iterations-before-warn
+                   fenzo-floor-iterations-before-reset
+                   fenzo-fitness-calculator
+                   task-constraints
+                   executor
+                   gpu-enabled?
+                   good-enough-fitness
+        trigger-chans)
+                       driver (make-mesos-driver-fn scheduler framework-id)]
                                     (mesomatic.scheduler/start! driver)
                                     (reset! current-driver driver)
 

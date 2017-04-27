@@ -1,9 +1,14 @@
 (ns cook.test.mesos.task
   (:use clojure.test)
-  (:require [clojure.edn :as edn]
+  (:require [clojure.data.json :as json]
+            [clojure.edn :as edn]
+            [clojure.string :as str]
             [cook.mesos.scheduler :as sched]
             [cook.mesos.task :as task]
-            [mesomatic.types :as mtypes]))
+            [cook.test.testutil :as tu]
+            [datomic.api :as d]
+            [mesomatic.types :as mtypes])
+  (:import (java.util UUID)))
 
 (deftest test-resources-by-role
   (let [
@@ -115,98 +120,265 @@
            (-> tasks first :resources)))))
 
 (deftest test-task-info->mesos-message
-  (let [task {:name "yaiqlzwhfm_andalucien_4425e656-2278-4f91-b1e4-9a2e942e6e82",
-              :slave-id {:value "foobar"},
-              :task-id "4425e656-2278-4f91-b1e4-9a2e942e6e82",
-              :scalar-resource-messages [{:name "mem", :type :value-scalar, :scalar 623.0, :role "cook"}
-                                        {:name "cpus", :type :value-scalar, :scalar 1.0, :role "cook"}]
-              :ports-resource-messages [{:name "ports" :type :value-ranges :role "cook" :ranges [{:begin 31000 :end 31002}]}]
-              :executor-key :command
-              :command {:value "sleep 26; exit 0",
-                        :environment {"MYENV" "VAR"},
-                        :user "andalucien",
-                        :uris [{:value "http://www.yahoo.com"
-                                :executable true
-                                :cache true
-                                :extract true}]}
-              :labels {"foo" "bar", "doo" "dar"},
-              :data (.getBytes (pr-str {:instance "5"}) "UTF-8"),
-              :framework-id {:value "4425e656-2278-4f91-b1e4-9a2e942e6e81"}
-              :role "4425e656-2278-4f91-b1e4-9a2e942e6e82",
-              :num-ports 0,
-              :resources {:mem 623.0
-                          :cpus 1.0
-                          :ports [{:begin 31000, :end 31002}]}}
-        container {:type "DOCKER"
-                   :volumes [{:container-path "/var/lib/sss"
-                              :host-path "/var/lib/sss"
-                              :mode "RW"}]
-                   :docker {:image "nvidia/cuda"
-                            :network "HOST"
-                            :force-pull-image false
-                            :parameters [{:key "user" :value "100:5"}]
-                            :port-mapping [{:host-port 0
-                                            :container-port 1
-                                            :protocol "tcp"}]}}
-        custom-executor-task (assoc task :executor-key :executor)
-        container-task (assoc task :container container)
-        ;; roundrip to and from Mesos protobuf to validate clojure data format
-        msg (->> task
-                 task/task-info->mesos-message
-                 (mtypes/->pb :TaskInfo)
-                 mtypes/pb->data)
-        custom-executor-msg (->> custom-executor-task
+  (testing "task-info->mesos-message"
+    (let [command "sleep 26; exit 0"
+          task {:name "yaiqlzwhfm_andalucien_4425e656-2278-4f91-b1e4-9a2e942e6e82",
+                :slave-id {:value "foobar"},
+                :task-id "4425e656-2278-4f91-b1e4-9a2e942e6e82",
+                :scalar-resource-messages [{:name "mem", :type :value-scalar, :scalar 623.0, :role "cook"}
+                                           {:name "cpus", :type :value-scalar, :scalar 1.0, :role "cook"}]
+                :ports-resource-messages [{:name "ports" :type :value-ranges :role "cook" :ranges [{:begin 31000 :end 31002}]}]
+                :command {:value command,
+                          :environment {"MYENV" "VAR"},
+                          :user "andalucien",
+                          :uris [{:value "http://www.yahoo.com"
+                                  :executable true
+                                  :cache true
+                                  :extract true}]}
+                :labels {"foo" "bar", "doo" "dar"},
+                :data (.getBytes "string-data" "UTF-8")
+                :framework-id {:value "4425e656-2278-4f91-b1e4-9a2e942e6e81"}
+                :role "4425e656-2278-4f91-b1e4-9a2e942e6e82",
+                :num-ports 0,
+                :resources {:mem 623.0
+                            :cpus 1.0
+                            :ports [{:begin 31000, :end 31002}]}}
+          ;; roundrip to and from Mesos protobuf to validate clojure data format
+          msg (->> task
+                   task/task-info->mesos-message
+                   (mtypes/->pb :TaskInfo)
+                   mtypes/pb->data)]
+
+      (testing "name-and-ids"
+        (is (= (:name msg) (:name task)))
+        (is (= (-> msg :slave-id :value) (-> task :slave-id :value)))
+        (is (= (-> msg :task-id :value) (:task-id task))))
+
+      (testing "resources"
+        ;; offers have the same resources structure as tasks so we can reuse (offer-resource-values)
+        (is (= (sched/offer-resource-scalar msg "mem") (-> task :resources :mem)))
+        (is (= (sched/offer-resource-scalar msg "cpus") (-> task :resources :cpus)))
+        (is (= (->> (sched/offer-resource-ranges msg "ports") first :begin)
+               (-> task :resources :ports first :begin)))
+        (is (= (->> (sched/offer-resource-ranges msg "ports") first :end)
+               (-> task :resources :ports first :end)))
+        (is (= (->> msg :resources (map :role))
+               (map :role (into (:scalar-resource-messages task)
+                                (:ports-resource-messages task))))))
+
+      (testing "labels"
+        (is (= (->> msg :labels :labels (filter #(= (:key %) "foo")) first :value) "bar")))
+
+
+      (testing "container-task"
+        (let [container {:type "DOCKER"
+                         :volumes [{:container-path "/var/lib/sss"
+                                    :host-path "/var/lib/sss"
+                                    :mode "RW"}]
+                         :docker {:image "nvidia/cuda"
+                                  :network "HOST"
+                                  :force-pull-image false
+                                  :parameters [{:key "user" :value "100:5"}]
+                                  :port-mapping [{:host-port 0
+                                                  :container-port 1
+                                                  :protocol "tcp"}]}}
+              container-task (assoc task :container container)
+              ;; TODO: Check values of container-msg.
+              ;; mesomatic doesn't do conversion to map for containerinfo so holding off for now
+              container-msg (->> container-task
                                  task/task-info->mesos-message
                                  (mtypes/->pb :TaskInfo)
-                                 mtypes/pb->data)
-        ;; TODO: Check values of container-msg.
-        ;; mesomatic doesn't do conversion to map for containerinfo so holding off for now
-        container-msg (->> container-task
-                           task/task-info->mesos-message
-                           (mtypes/->pb :TaskInfo)
-                           mtypes/pb->data)]
+                                 mtypes/pb->data)]
+          (do container-msg)))
 
-    (is (= (:name msg) (:name task)))
-    (is (= (-> msg :slave-id :value) (-> task :slave-id :value)))
-    (is (= (-> msg :task-id :value) (:task-id task)))
+      (testing "command-executor"
+        (let [command-executor-task (assoc task :executor-key :command-executor
+                                                :data (.getBytes (pr-str {:instance "5"}) "UTF-8"))
+              command-executor-msg (->> command-executor-task
+                                        task/task-info->mesos-message
+                                        (mtypes/->pb :TaskInfo)
+                                        mtypes/pb->data)]
+          ;; Check custom executor built correctly
+          (is (= (:instance (edn/read-string (String. (.toByteArray (:data command-executor-msg))))) "5"))
+          (let [command-executor-msg-cmd (-> command-executor-msg :command)
+                command-executor-task-cmd (-> command-executor-task :command)
+                command-executor-msg-uri (-> command-executor-msg-cmd :uris first)
+                command-executor-task-uri (-> command-executor-task-cmd :uris first)]
+            (is (= (:user command-executor-msg-cmd) (:user command-executor-task-cmd)))
+            (is (= (:value command-executor-msg-cmd) (:value command-executor-task-cmd)))
+            (is (= (:cache command-executor-msg-uri) (:cache command-executor-task-uri)))
+            (is (= (:executable command-executor-msg-uri) (:executable command-executor-task-uri)))
+            (is (= (:extract command-executor-msg-uri) (:extract command-executor-task-uri)))
+            (is (= (:value command-executor-msg-uri) (:value command-executor-task-uri))))))
 
-    ;; offers have the same resources structure as tasks so we can reuse (offer-resource-values)
-    (is (= (sched/offer-resource-scalar msg "mem") (-> task :resources :mem)))
-    (is (= (sched/offer-resource-scalar msg "cpus") (-> task :resources :cpus)))
-    (is (= (->> (sched/offer-resource-ranges msg "ports") first :begin)
-           (-> task :resources :ports first :begin)))
-    (is (= (->> (sched/offer-resource-ranges msg "ports") first :end)
-           (-> task :resources :ports first :end)))
-    (is (= (->> msg :resources (map :role))
-           (map :role (concat (:scalar-resource-messages task)
-                              (:ports-resource-messages task)))))
+      (doseq [executor-key [:cook-executor :custom-executor]]
+        (testing (str "common-fields-" executor-key)
+          (let [task (assoc task :executor-key executor-key)
+                ;; roundrip to and from Mesos protobuf to validate clojure data format
+                msg (->> task
+                         task/task-info->mesos-message
+                         (mtypes/->pb :TaskInfo)
+                         mtypes/pb->data)]
+            (let [msg-cmd (-> msg :executor :command)
+                  task-cmd (:command task)
+                  msg-uri (-> msg-cmd :uris first)
+                  task-uri (-> task-cmd :uris first)]
+              (is (str/blank? (-> msg :command :uris first)))
+              (is (str/blank? (-> msg :command :user)))
+              (is (str/blank? (-> msg :command :value)))
+              (is (= (:user msg-cmd) (:user task-cmd)))
+              (is (= (:value msg-cmd) (:value task-cmd)))
+              (is (= (:cache msg-uri) (:cache task-uri)))
+              (is (= (:executable msg-uri) (:executable task-uri)))
+              (is (= (:extract msg-uri) (:extract task-uri)))
+              (is (= (:value msg-uri) (:value task-uri))))
+            ;; the following assertions don't use the roundtrip because Mesomatic currently
+            ;; has a bug and doesn't convert env var info back into clojure data.
+            ;; It's not a problem for Cook, except for the purposes of this unit test.
+            (let [msg-env (-> task task/task-info->mesos-message :executor :command :environment)]
+              (is (= (-> msg-env :variables first :name) "MYENV"))
+              (is (= (-> msg-env :variables first :value) "VAR"))))))
 
-    (is (= (:instance (edn/read-string (String. (.toByteArray (:data msg))))) "5"))
+      (testing "cook-executor"
+        (let [cook-executor-task (assoc task :executor-key :cook-executor
+                                               :data (.getBytes command "UTF-8"))
+              cook-executor-msg (->> cook-executor-task
+                                       task/task-info->mesos-message
+                                       (mtypes/->pb :TaskInfo)
+                                       mtypes/pb->data)]
+          ;; Check custom executor built correctly
+          (is (= command (String. (.toByteArray (:data cook-executor-msg)))))
+          (is (= (-> cook-executor-msg :executor :executor-id :value) (:task-id task)))
+          (is (= (-> cook-executor-msg :executor :framework-id :value) (-> task :framework-id :value)))
+          (is (= (-> cook-executor-msg :executor :name) task/cook-executor-name))
+          (is (= (-> cook-executor-msg :executor :source) task/executor-source))
+          (is (= (-> cook-executor-msg :executor :command :value)
+                 (-> task :command :value)))))
 
-    (is (= (->> msg :labels :labels (filter #(= (:key %) "foo")) first :value) "bar"))
+      (testing "custom-executor"
+        (let [custom-executor-task (assoc task :executor-key :custom-executor
+                                               :data (.getBytes (pr-str {:instance "5"}) "UTF-8"))
+              custom-executor-msg (->> custom-executor-task
+                                       task/task-info->mesos-message
+                                       (mtypes/->pb :TaskInfo)
+                                       mtypes/pb->data)]
+          ;; Check custom executor built correctly
+          (is (= (:instance (edn/read-string (String. (.toByteArray (:data custom-executor-msg))))) "5"))
+          (is (= (-> custom-executor-msg :executor :executor-id :value) (:task-id task)))
+          (is (= (-> custom-executor-msg :executor :framework-id :value) (-> task :framework-id :value)))
+          (is (= (-> custom-executor-msg :executor :name) task/custom-executor-name))
+          (is (= (-> custom-executor-msg :executor :source) task/executor-source))
+          (is (= (-> custom-executor-msg :executor :command :value)
+                 (-> task :command :value))))))))
 
-    (let [msg-cmd (:command msg)
-          task-cmd (:command task)
-          msg-uri (-> msg-cmd :uris first)
-          task-uri (-> task-cmd :uris first)]
-      (is (= (:value msg-cmd) (:value task-cmd)))
-      (is (= (:user msg-cmd) (:user task-cmd)))
-      (is (= (:value msg-uri) (:value task-uri)))
-      (is (= (:executable msg-uri) (:executable task-uri)))
-      (is (= (:cache msg-uri) (:cache task-uri)))
-      (is (= (:extract msg-uri) (:extract task-uri))))
+(deftest test-job->task-metadata
+  (let [uri "datomic:mem://test-job-task-metadata"
+        conn (tu/restore-fresh-database! uri)
+        executor {:command "./cook-executor"
+                  :log-level "INFO"
+                  :max-message-length 512
+                  :progress-output-name "stdout"
+                  :progress-regex-string "regex-string"
+                  :progress-sample-interval-ms 1000
+                  :uri {:cache true
+                        :executable true
+                        :extract false
+                        :value "file:///path/to/cook-executor"}}]
 
-    ;; the following assertions don't use the roundtrip because Mesomatic currently
-    ;; has a bug and doesn't convert env var info back into clojure data.
-    ;; It's not a problem for Cook, except for the purposes of this unit test.
-    (let [msg-env (-> task task/task-info->mesos-message :command :environment)]
-      (is (= (-> msg-env :variables first :name) "MYENV"))
-      (is (= (-> msg-env :variables first :value) "VAR")))
+    (testing "custom-executor with simple job"
+      (let [task-id (str (UUID/randomUUID))
+            job (tu/create-dummy-job conn :user "test-user" :job-state :job.state/running :command "run-my-command")
+            db (d/db conn)
+            job-ent (d/entity db job)
+            fid {:value "framework-id"}
+            task-metadata (task/job->task-metadata db fid executor job-ent task-id)]
+        (is (= {:labels {}
+                :task-id task-id
+                :executor-key :custom-executor
+                :name (format "dummy_job_%s_%s" (:job/user job-ent) task-id)
+                :command {:value "run-my-command", :environment {}, :user "test-user", :uris []}
+                :container nil
+                :environment {}
+                :framework-id fid
+                :num-ports 0
+                :resources {:mem 10.0, :cpus 1.0}}
+               (dissoc task-metadata :data)))
+        (is (= (pr-str {:instance "0"}) (-> task-metadata :data (String. "UTF-8"))))))
 
-    ;; Check custom executor built correctly
-    (is (= (-> custom-executor-msg :executor :executor-id :value) (:task-id task)))
-    (is (= (-> custom-executor-msg :executor :framework-id :value) (-> task :framework-id :value)))
-    (is (= (-> custom-executor-msg :executor :name) task/custom-executor-name))
-    (is (= (-> custom-executor-msg :executor :source) task/custom-executor-source))
-    (is (= (-> custom-executor-msg :executor :command :value)
-           (-> task :command :value)))))
+    (testing "explicit custom-executor with simple job"
+      (let [task-id (str (UUID/randomUUID))
+            job (tu/create-dummy-job conn :user "test-user" :job-state :job.state/running :command "run-my-command"
+                                     :custom-executor? true)
+            db (d/db conn)
+            job-ent (d/entity db job)
+            fid {:value "framework-id"}
+            task-metadata (task/job->task-metadata db fid executor job-ent task-id)]
+        (is (= {:labels {}
+                :task-id task-id
+                :executor-key :custom-executor
+                :name (format "dummy_job_%s_%s" (:job/user job-ent) task-id)
+                :command {:value "run-my-command", :environment {}, :user "test-user", :uris []}
+                :container nil
+                :environment {}
+                :framework-id fid
+                :num-ports 0
+                :resources {:mem 10.0, :cpus 1.0}}
+               (dissoc task-metadata :data)))
+        (is (= (pr-str {:instance "0"}) (-> task-metadata :data (String. "UTF-8"))))))
+
+    (testing "cook-executor with simple job"
+      (let [task-id (str (UUID/randomUUID))
+            job (tu/create-dummy-job conn :user "test-user" :job-state :job.state/running :command "run-my-command"
+                                     :custom-executor? false)
+            db (d/db conn)
+            job-ent (d/entity db job)
+            fid {:value "framework-id"}
+            task-metadata (task/job->task-metadata db fid executor job-ent task-id)]
+        (is (= {:labels {}
+                :task-id task-id
+                :executor-key :cook-executor
+                :name (format "dummy_job_%s_%s" (:job/user job-ent) task-id)
+                :command {:value (:command executor)
+                          :environment {"EXECUTOR_LOG_LEVEL" (:log-level executor)
+                                        "EXECUTOR_MAX_MESSAGE_LENGTH" (:max-message-length executor)
+                                        "PROGRESS_OUTPUT_FILE" "stdout"
+                                        "PROGRESS_REGEX_STRING" "regex-string"
+                                        "PROGRESS_SAMPLE_INTERVAL_MS" (:progress-sample-interval-ms executor)}
+                          :user "test-user"
+                          :uris [(:uri executor)]}
+                :container nil
+                :environment {"EXECUTOR_LOG_LEVEL" (:log-level executor)
+                              "EXECUTOR_MAX_MESSAGE_LENGTH" (:max-message-length executor)
+                              "PROGRESS_OUTPUT_FILE" "stdout"
+                              "PROGRESS_REGEX_STRING" "regex-string"
+                              "PROGRESS_SAMPLE_INTERVAL_MS" (:progress-sample-interval-ms executor)}
+                :framework-id fid
+                :num-ports 0
+                :resources {:mem 10.0, :cpus 1.0}}
+               (dissoc task-metadata :data)))
+        (is (= (json/write-str {"command" "run-my-command"})
+               (-> task-metadata :data (String. "UTF-8"))))))
+
+    (testing "command-executor with simple job"
+      (let [task-id (str (UUID/randomUUID))
+            job (tu/create-dummy-job conn :user "test-user" :job-state :job.state/running :command "run-my-command"
+                                     :custom-executor? false)
+            db (d/db conn)
+            job-ent (d/entity db job)
+            fid {:value "framework-id"}
+            task-metadata (task/job->task-metadata db fid {} job-ent task-id)]
+        (is (= {:labels {}
+                :task-id task-id
+                :executor-key :command-executor
+                :name (format "dummy_job_%s_%s" (:job/user job-ent) task-id)
+                :command {:value "run-my-command"
+                          :environment {}
+                          :user "test-user"
+                          :uris []}
+                :container nil
+                :environment {}
+                :framework-id fid
+                :num-ports 0
+                :resources {:mem 10.0, :cpus 1.0}}
+               (dissoc task-metadata :data)))
+        (is (= (pr-str {:instance "0"}) (-> task-metadata :data (String. "UTF-8"))))))))
