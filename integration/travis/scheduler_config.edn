@@ -17,6 +17,7 @@
          :failover-timeout-ms nil
          :leader-path "/cook-scheduler"
          :role "cook"}
+ :executor {:command "/home/travis/build/twosigma/Cook/travis/cook-executor"}
  :unhandled-exceptions {:log-level :error}
  :metrics {:jmx true}
  :nrepl {:enabled? false}

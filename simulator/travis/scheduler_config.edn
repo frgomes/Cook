@@ -22,6 +22,7 @@
          :failover-timeout-ms nil
          :leader-path "/cook-scheduler"
          :role "cook"}
+ :executor {:command "curl http://downloader@172.17.0.1:12321/resource/cook-executor -o cook-executor && chmod +x cook-executor && echo 'Launching cook-executor\n' && ./cook-executor"}
  :unhandled-exceptions {:log-level :error}
  :metrics {:jmx true}
  :nrepl {:enabled? true
@@ -31,5 +32,4 @@
                 "datomic.peer" :warn
                 "datomic.kv-cluster" :warn
                 "cook.mesos.rebalancer" :debug
-                "cook.mesos.scheduler" :debug
                 :default :info}}}

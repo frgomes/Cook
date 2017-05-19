@@ -2,6 +2,9 @@
 set -ev
 
 cd $PROJECT_DIR/../travis
+
+./build_cook_executor.sh
+
 ./datomic-free-0.9.5394/bin/transactor $(pwd)/datomic_transactor.properties &
 ./minimesos up
 

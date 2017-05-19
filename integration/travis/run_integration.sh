@@ -3,6 +3,9 @@ set -ev
 
 export PROJECT_DIR=`pwd`
 
+# Build cook-executor
+$PROJECT_DIR/../travis/build_cook_executor.sh
+
 # Start minimesos
 cd ${PROJECT_DIR}/../travis
 ./minimesos up
